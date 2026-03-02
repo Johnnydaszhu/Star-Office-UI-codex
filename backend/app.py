@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 
 # Paths (project-relative, no hardcoded absolute paths)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +16,15 @@ FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
 STATE_FILE = os.path.join(ROOT_DIR, "state.json")
 AGENTS_STATE_FILE = os.path.join(ROOT_DIR, "agents-state.json")
 JOIN_KEYS_FILE = os.path.join(ROOT_DIR, "join-keys.json")
+REMOTE_AGENT_SOURCE = os.environ.get("OFFICE_REMOTE_SOURCE", "remote-codex")
+CODEX_HOME = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+CODEX_GLOBAL_STATE_FILE = os.path.join(CODEX_HOME, ".codex-global-state.json")
+AUTO_SYNC_CODEX_STATE = os.environ.get("STAR_OFFICE_AUTO_CODEX", "1").strip().lower() in {"1", "true", "yes"}
+CODEX_ACTIVE_SECONDS = int(os.environ.get("STAR_OFFICE_CODEX_ACTIVE_SECONDS", "45"))
+CODEX_WARM_SECONDS = int(os.environ.get("STAR_OFFICE_CODEX_WARM_SECONDS", "300"))
+CODEX_IDLE_SECONDS = int(os.environ.get("STAR_OFFICE_CODEX_IDLE_SECONDS", "1800"))
+CODEX_SYNC_MIN_INTERVAL = int(os.environ.get("STAR_OFFICE_CODEX_SYNC_MIN_INTERVAL", "5"))
+_last_codex_sync_ts = 0.0
 
 
 def get_yesterday_date_str():
@@ -157,6 +167,135 @@ DEFAULT_STATE = {
 }
 
 
+def _tail_text(path, max_bytes=24576):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes), os.SEEK_SET)
+            return f.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _find_latest_file(root_dir, suffix):
+    latest_path = None
+    latest_mtime = 0.0
+    if not root_dir or not os.path.exists(root_dir):
+        return latest_path, latest_mtime
+
+    for root, _, files in os.walk(root_dir):
+        for filename in files:
+            if not filename.endswith(suffix):
+                continue
+            file_path = os.path.join(root, filename)
+            try:
+                mtime = os.path.getmtime(file_path)
+            except Exception:
+                continue
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+                latest_path = file_path
+    return latest_path, latest_mtime
+
+
+def _extract_recent_prompt():
+    try:
+        with open(CODEX_GLOBAL_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        prompt_history = data.get("electron-persisted-atom-state", {}).get("prompt-history")
+        if isinstance(prompt_history, list) and prompt_history:
+            prompt = str(prompt_history[-1]).replace("\n", " ").strip()
+            if len(prompt) > 32:
+                prompt = prompt[:32] + "..."
+            return prompt
+    except Exception:
+        return ""
+    return ""
+
+
+def _infer_codex_state():
+    session_file, session_mtime = _find_latest_file(os.path.join(CODEX_HOME, "sessions"), ".jsonl")
+
+    global_mtime = 0.0
+    if os.path.exists(CODEX_GLOBAL_STATE_FILE):
+        try:
+            global_mtime = os.path.getmtime(CODEX_GLOBAL_STATE_FILE)
+        except Exception:
+            global_mtime = 0.0
+
+    newest_ts = max(session_mtime, global_mtime)
+    if newest_ts <= 0:
+        return None
+
+    age = time.time() - newest_ts
+    prompt = _extract_recent_prompt()
+
+    error_detected = False
+    if session_file:
+        tail = _tail_text(session_file).lower()
+        error_keywords = [
+            "\"type\":\"error\"",
+            "\"status\":\"error\"",
+            "\"exit_code\":1",
+            "traceback",
+            "exception",
+            "command failed",
+        ]
+        error_detected = any(keyword in tail for keyword in error_keywords)
+
+    if error_detected and age <= max(300, CODEX_WARM_SECONDS):
+        return {"state": "error", "detail": "Codex 最近出现错误，请检查终端输出"}
+    if age <= CODEX_ACTIVE_SECONDS:
+        detail = f"Codex 正在处理：{prompt}" if prompt else "Codex 正在处理任务"
+        return {"state": "executing", "detail": detail}
+    if age <= CODEX_WARM_SECONDS:
+        detail = f"Codex 最近活跃：{prompt}" if prompt else "Codex 最近活跃"
+        return {"state": "writing", "detail": detail}
+    if age <= CODEX_IDLE_SECONDS:
+        return {"state": "researching", "detail": "Codex 近期活跃，当前可能在思考/等待"}
+    return {"state": "idle", "detail": "Codex 待命中"}
+
+
+def _maybe_sync_codex_state(state):
+    global _last_codex_sync_ts
+
+    if not AUTO_SYNC_CODEX_STATE:
+        return state
+
+    now_ts = time.time()
+    if (now_ts - _last_codex_sync_ts) < max(1, CODEX_SYNC_MIN_INTERVAL):
+        return state
+
+    _last_codex_sync_ts = now_ts
+    inferred = _infer_codex_state()
+    if not inferred:
+        return state
+
+    next_state = dict(state)
+    next_state["state"] = inferred["state"]
+    next_state["detail"] = inferred["detail"]
+    next_state["progress"] = 0
+    next_state["ttl_seconds"] = max(60, CODEX_SYNC_MIN_INTERVAL * 4)
+    next_state["source"] = "codex-local"
+    next_state["updated_at"] = datetime.now().isoformat()
+
+    working_states = {"writing", "researching", "executing"}
+    heartbeat_required = inferred["state"] in working_states
+    changed = (
+        state.get("state") != next_state.get("state")
+        or state.get("detail") != next_state.get("detail")
+        or state.get("source") != next_state.get("source")
+        or heartbeat_required
+    )
+    if changed:
+        try:
+            save_state(next_state)
+        except Exception:
+            pass
+    return next_state
+
+
 def load_state():
     """Load state from file.
 
@@ -176,6 +315,8 @@ def load_state():
 
     if not isinstance(state, dict):
         state = dict(DEFAULT_STATE)
+
+    state = _maybe_sync_codex_state(state)
 
     # Auto-idle
     try:
@@ -559,7 +700,7 @@ def join_agent():
                 existing["detail"] = detail
                 existing["updated_at"] = datetime.now().isoformat()
                 existing["area"] = state_to_area(state)
-                existing["source"] = "remote-openclaw"
+                existing["source"] = REMOTE_AGENT_SOURCE
                 existing["joinKey"] = join_key
                 existing["authStatus"] = "approved"
                 existing["authApprovedAt"] = datetime.now().isoformat()
@@ -582,7 +723,7 @@ def join_agent():
                     "detail": detail,
                     "updated_at": datetime.now().isoformat(),
                     "area": state_to_area(state),
-                    "source": "remote-openclaw",
+                    "source": REMOTE_AGENT_SOURCE,
                     "joinKey": join_key,
                     "authStatus": "approved",
                     "authApprovedAt": datetime.now().isoformat(),
@@ -664,7 +805,7 @@ def get_status():
 
 @app.route("/agent-push", methods=["POST"])
 def agent_push():
-    """Remote openclaw actively pushes status to office.
+    """Remote agent actively pushes status to office.
 
     Required fields:
     - agentId
@@ -723,7 +864,7 @@ def agent_push():
             target["name"] = name
         target["updated_at"] = datetime.now().isoformat()
         target["area"] = state_to_area(state)
-        target["source"] = "remote-openclaw"
+        target["source"] = REMOTE_AGENT_SOURCE
         target["lastPushAt"] = datetime.now().isoformat()
 
         save_agents_state(agents)

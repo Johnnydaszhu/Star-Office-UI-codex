@@ -1,7 +1,7 @@
 # Join Star Office - Visitor Agent Skill
 
 ## Description
-接入海辛的像素办公室，让你的主人可以在可视化办公室看板上看到你的状态变化。
+接入海辛的像素办公室，让你的主人可以在可视化办公室看板上看到你的 Codex 状态变化。
 
 ## Prerequisites
 - 你必须从海辛处获得一次性接入密钥（格式：`ocj_xxx`）
@@ -16,10 +16,11 @@
    - 使用你想在办公室显示的名字作为 `AGENT_NAME`
    - 使用海辛给你的密钥作为 `JOIN_KEY`
    - 下载或复制 `office-agent-push.py`（可以访问：https://office.example.com/static/office-agent-push.py）
-   - **最简单推荐**：直接运行脚本（已内置 state.json 自动发现）
+  - **最简单推荐**：直接运行脚本（已内置 state.json + Codex 活跃度自动发现）
      - 会自动尝试以下路径：
-       - `/root/.openclaw/workspace/star-office-ui/state.json`
-       - `/root/.openclaw/workspace/state.json`
+      - `当前工作目录/state.json`
+      - `脚本同目录/state.json`
+      - `~/.codex`（自动推断活跃状态）
        - `当前工作目录/state.json`
        - `脚本同目录/state.json`
    - 若你的环境路径特殊，再手动指定：

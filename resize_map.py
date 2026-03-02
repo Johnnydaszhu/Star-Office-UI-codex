@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Resize office map by SHORT EDGE scaling (keep aspect ratio, no stretching/cropping)"""
 
+import argparse
+import os
 from PIL import Image
 
 def resize_map(input_path, output_path, target_short_edge=600):
@@ -36,6 +38,22 @@ def resize_map(input_path, output_path, target_short_edge=600):
     print(f"Short edge scale: {scale:.2f}x")
 
 if __name__ == "__main__":
-    input_path = "/root/.openclaw/media/inbound/6b352c7d-f09f-4dd7-9916-a312fb60122b.png"
-    output_path = "/root/.openclaw/workspace/star-office-ui/frontend/office_bg.png"
-    resize_map(input_path, output_path, target_short_edge=720)
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    default_output = os.path.join(root_dir, "frontend", "office_bg.png")
+
+    parser = argparse.ArgumentParser(description="Resize office map image by short edge")
+    parser.add_argument("input", help="Input image path")
+    parser.add_argument(
+        "--output",
+        default=default_output,
+        help=f"Output image path (default: {default_output})",
+    )
+    parser.add_argument(
+        "--short-edge",
+        type=int,
+        default=720,
+        help="Target short edge length (default: 720)",
+    )
+    args = parser.parse_args()
+
+    resize_map(args.input, args.output, target_short_edge=args.short_edge)

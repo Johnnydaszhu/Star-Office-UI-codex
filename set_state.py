@@ -6,7 +6,8 @@ import os
 import sys
 from datetime import datetime
 
-STATE_FILE = "/root/.openclaw/workspace/star-office-ui/state.json"
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.environ.get("STAR_OFFICE_STATE_FILE", os.path.join(ROOT_DIR, "state.json"))
 
 VALID_STATES = [
     "idle",
@@ -36,6 +37,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("用法: python set_state.py <state> [detail]")
         print(f"状态选项: {', '.join(VALID_STATES)}")
+        print(f"当前状态文件: {STATE_FILE}")
         print("\n例子:")
         print("  python set_state.py idle")
         print("  python set_state.py researching \"在查 Godot MCP...\"")
